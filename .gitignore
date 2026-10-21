@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+
+# Local data / secrets (the live config holds the bot token)
+data/
+config.local.json
+*.db
+*.log
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/

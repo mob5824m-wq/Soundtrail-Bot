@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Soundtrail Support dashboard</title>
+  <link rel="stylesheet" href="static/dashboard.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>Soundtrail Support</h1>
+    <span id="demo-badge" class="badge" hidden>Demo: nothing is sent to Discord</span>
+    <span id="version" class="muted"></span>
+    <div class="spacer"></div>
+    <label class="inline">
+      <span>Server</span>
+      <select id="guild-select" disabled></select>
+    </label>
+    <button id="logout-btn" class="ghost" type="button" hidden>Log out</button>
+  </header>
+
+  <main>
+    <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+
+    <!-- Login -->
+    <section id="login-view" class="panel narrow" hidden>
+      <h2>Sign in</h2>
+      <p class="muted">Enter the dashboard token. Run <code>python bot.py --dashboard-token</code> on the bot machine to see it.</p>
+      <form id="login-form" class="stack">
+        <label>Dashboard token
+          <input id="token" name="token" type="password" autocomplete="current-password" required>
+        </label>
+        <button type="submit">Sign in</button>
+        <p id="login-error" class="error" role="alert" hidden></p>
+      </form>
+    </section>
+
+    <!-- The application -->
+    <div id="app-view" hidden>
+      <nav class="tabs" id="tabs" aria-label="Sections">
+        <button type="button" data-tab="overview" class="active">Overview</button>
+        <button type="button" data-tab="announce">Announce</button>
+        <button type="button" data-tab="scheduled">Scheduled</button>
+        <button type="button" data-tab="approvals">Approvals</button>
+        <button type="button" data-tab="templates">Templates</button>
+        <button type="button" data-tab="polls">Polls</button>
+        <button type="button" data-tab="tickets">Tickets</button>
+        <button type="button" data-tab="roles">Roles</button>
+        <button type="button" data-tab="events">Events</button>
+        <button type="button" data-tab="welcome">Welcome</button>
+        <button type="button" data-tab="settings">Settings</button>
+        <button type="button" data-tab="audit">Audit log</button>
+      </nav>
+
+      <!-- Overview -->
+      <section class="panel" data-panel="overview">
+        <h2>Overview</h2>
+        <div id="stats" class="stats"></div>
+        <h3>Recent announcements</h3>
+        <ul id="overview-recent" class="list"></ul>
+      </section>
+
+      <!-- Announce now -->
+      <section class="panel" data-panel="announce" hidden>
+        <h2>Announce now</h2>
+        <form id="announce-form" class="grid">
+          <label class="span2">Heading (optional)
+            <input name="title" maxlength="256">
+          </label>
+          <label class="span2">Message
+            <textarea name="message" rows="6" maxlength="4000" required></textarea>
+          </label>
+          <label>Channel
+            <select name="channel_id" class="channel-select"></select>
+          </label>
+          <label>Ping role
+            <select name="mention_role_id" class="role-select"></select>
+          </label>
+          <label>Pin for (optional)
+            <input name="pin_for" placeholder="24h, 3d. Blank means no pin">
+          </label>
+          <label class="check"><input type="checkbox" name="publish"> Publish to followers (announcement channels)</label>
+          <div class="actions span2"><button type="submit">Post now</button></div>
+        </form>
+        <form id="edit-form" class="grid" hidden>
+          <input type="hidden" name="message_id">
+          <p class="span2"><strong>Edit announcement <span id="edit-where"></span></strong></p>
+          <label class="span2">Heading
+            <input name="title" maxlength="256">
+          </label>
+          <label class="span2">Message
+            <textarea name="message" rows="6" maxlength="4000" required></textarea>
+          </label>
+          <div class="actions span2">
+            <button type="submit">Save changes</button>
+            <button type="button" class="ghost" id="edit-cancel">Cancel</button>
+          </div>
+        </form>
+        <h3>Recent</h3>
+        <ul id="announce-history" class="list"></ul>
+      </section>
+
+      <!-- Scheduled and repeating -->
+      <section class="panel" data-panel="scheduled" hidden>
+        <h2>Schedule an announcement</h2>
+        <form id="schedule-form" class="grid">
+          <label>When
+            <input name="when" required placeholder="2h, 1d12h, or 2026-10-20 18:00">
+          </label>
+          <label>Repeat every (optional)
+            <input name="repeat_every" placeholder="1d, 12h, 30m (15m minimum)">
+          </label>
+          <label class="span2">Heading (optional)
+            <input name="title" maxlength="256">
+          </label>
+          <label class="span2">Message
+            <textarea name="message" rows="5" maxlength="4000" required></textarea>
+          </label>
+          <label>Channel
+            <select name="channel_id" class="channel-select"></select>
+          </label>
+          <label>Ping role
+            <select name="mention_role_id" class="role-select"></select>
+          </label>
+          <label>Pin for (optional)
+            <input name="pin_for" placeholder="24h, 3d. For repeats, shorter than the gap">
+          </label>
+          <label class="check"><input type="checkbox" name="publish"> Publish to followers</label>
+          <div class="actions span2"><button type="submit">Schedule</button></div>
+        </form>
+        <h3>Waiting to go out</h3>
+        <ul id="scheduled-list" class="list"></ul>
+        <h3>Pinned now</h3>
+        <ul id="pin-list" class="list"></ul>
+      </section>
+
+      <!-- Approval queue -->
+      <section class="panel" data-panel="approvals" hidden>
+        <h2>Approval queue</h2>
+        <p class="muted">When “Require approval” is on in Settings, announcements wait here. Someone other than the person who asked must approve them.</p>
+        <ul id="approval-list" class="list"></ul>
+      </section>
+
+      <!-- Templates -->
+      <section class="panel" data-panel="templates" hidden>
+        <h2>Templates</h2>
+        <form id="template-form" class="grid">
+          <label>Name
+            <input name="name" maxlength="40" required placeholder="raid-night">
+          </label>
+          <label>Heading (optional)
+            <input name="title" maxlength="256">
+          </label>
+          <label class="span2">Message
+            <textarea name="message" rows="4" maxlength="4000" required></textarea>
+          </label>
+          <div class="actions span2"><button type="submit">Save template</button></div>
+        </form>
+        <h3>Saved</h3>
+        <ul id="template-list" class="list"></ul>
+        <form id="template-use-form" class="grid" hidden>
+          <p class="span2"><strong>Post “<span id="template-use-name"></span>”</strong></p>
+          <label>Channel
+            <select name="channel_id" class="channel-select"></select>
+          </label>
+          <label>Ping role
+            <select name="mention_role_id" class="role-select"></select>
+          </label>
+          <label class="check"><input type="checkbox" name="publish"> Publish to followers</label>
+          <div class="actions span2">
+            <button type="submit">Post now</button>
+            <button type="button" class="ghost" id="template-use-cancel">Cancel</button>
+          </div>
+        </form>
+      </section>
+
+      <!-- Polls -->
+      <section class="panel" data-panel="polls" hidden>
+        <h2>Polls</h2>
+        <form id="poll-form" class="grid">
+          <label class="span2">Question
+            <input name="question" maxlength="256" required>
+          </label>
+          <label class="span2">Options (one per line, 2 to 10)
+            <textarea name="options" rows="4" required></textarea>
+          </label>
+          <label>Close after (optional)
+            <input name="duration" placeholder="2h, 3d">
+          </label>
+          <label>Post at (optional)
+            <input name="send_at" placeholder="2h, or 2026-10-24 18:00">
+          </label>
+          <label>Channel
+            <select name="channel_id" class="channel-select"></select>
+          </label>
+          <label class="check span2"><input type="checkbox" name="multiple"> Let members pick more than one option</label>
+          <div class="actions span2"><button type="submit">Post poll</button></div>
+        </form>
+        <h3>Recent polls</h3>
+        <ul id="poll-list" class="list"></ul>
+        <section id="poll-detail" class="poll-detail" hidden aria-live="polite">
+          <div class="actions">
+            <h3 id="poll-detail-title" class="grow"></h3>
+            <span id="poll-detail-live" class="muted"></span>
+            <button type="button" class="ghost small" id="poll-detail-close">Close</button>
+          </div>
+          <ul id="poll-detail-body" class="list"></ul>
+        </section>
+      </section>
+
+      <!-- Tickets -->
+      <section class="panel" data-panel="tickets" hidden>
+        <h2>Tickets</h2>
+        <form id="ticket-panel-form" class="grid">
+          <label>Post the categorized support panel in
+            <select name="channel_id" class="channel-select"></select>
+          </label>
+          <div class="actions"><button type="submit">Post button</button></div>
+          <p class="span2 muted">The panel offers Technical issue, Account help and General question. Each member can have one open ticket at a time. Opening one creates a private channel for them and the staff role. Members can request urgent review; staff can claim, assign or change priority with /manage ticket commands. Use /manage ticket report for volume and first-response times. Closing saves a transcript below, then deletes the channel. Set the Discord channel category under Settings, and an idle-close limit there if you want quiet tickets closed for you.</p>
+        </form>
+        <h3>Open tickets</h3>
+        <ul id="ticket-list" class="list"></ul>
+        <h3>Closed tickets</h3>
+        <ul id="ticket-closed-list" class="list"></ul>
+      </section>
+
+      <!-- Roles: reaction roles and role menus -->
+      <section class="panel" data-panel="roles" hidden>
+        <h2>Roles</h2>
+        <h3>Reaction roles</h3>
+        <form id="role-form" class="grid">
+          <label class="span2">Message link, or its ID
+            <input name="message" required placeholder="Right-click the message, Copy Message Link">
+          </label>
+          <label>Emoji
+            <input name="emoji" required placeholder="🎮">
+          </label>
+          <label>Role to give
+            <select name="role_id" class="role-select" required></select>
+          </label>
+          <label>Channel (only if you gave an ID)
+            <select name="channel_id" class="channel-select"></select>
+          </label>
+          <div class="actions span2"><button type="submit">Add reaction role</button></div>
+          <p class="span2 muted">Members who add the emoji to that message get the role; removing it takes the role away. My role must sit above the role in Server Settings → Roles.</p>
+        </form>
+        <h3>Current rules</h3>
+        <ul id="role-list" class="list"></ul>
+        <h3>Role menus</h3>
+        <p class="muted">A role menu is one message with a dropdown. Members pick the roles they want from it. Roles they leave unticked are taken away, so a menu can also remove a role.</p>
+        <form id="menu-form" class="grid">
+          <label>Title
+            <input name="title" maxlength="256" required placeholder="Pick your games">
+          </label>
+          <label class="span2">Text above the roles (optional)
+            <textarea name="description" rows="2" maxlength="1000"></textarea>
+          </label>
+          <div class="actions span2"><button type="submit">Create menu</button></div>
+        </form>
+        <ul id="menu-list" class="list"></ul>
+      </section>
+
+      <!-- Events -->
+      <section class="panel" data-panel="events" hidden>
+        <h2>Events</h2>
+        <form id="event-form" class="grid">
+          <label class="span2">Title
+            <input name="title" maxlength="256" required>
+          </label>
+          <label>Starts
+            <input name="starts_when" required placeholder="2h, or 2026-10-20 19:00">
+          </label>
+          <label>Remind minutes before (0 for none)
+            <input name="remind_minutes" type="number" min="0" max="10080" placeholder="60">
+          </label>
+          <label class="span2">Details (optional)
+            <textarea name="description" rows="3" maxlength="1000"></textarea>
+          </label>
+          <label>Channel
+            <select name="channel_id" class="channel-select"></select>
+          </label>
+          <div class="actions span2"><button type="submit">Post event</button></div>
+        </form>
+        <h3>Upcoming</h3>
+        <ul id="event-list" class="list"></ul>
+      </section>
+
+      <!-- Welcome -->
+      <section class="panel" data-panel="welcome" hidden>
+        <h2>Welcome messages</h2>
+        <p class="muted" id="welcome-status"></p>
+        <form id="welcome-form" class="grid">
+          <label>Channel
+            <select name="channel_id" class="channel-select"></select>
+          </label>
+          <label class="span2">Message (leave empty for the default)
+            <textarea name="message" rows="4" maxlength="1000"></textarea>
+          </label>
+          <p class="span2 muted" id="welcome-placeholders"></p>
+          <div class="actions span2">
+            <button type="submit">Save welcome</button>
+            <button type="button" class="ghost" id="welcome-test">Send a test to the welcome channel</button>
+            <button type="button" class="danger" id="welcome-off">Turn off</button>
+          </div>
+        </form>
+      </section>
+
+      <!-- Settings -->
+      <section class="panel" data-panel="settings" hidden>
+        <h2>Settings</h2>
+        <form id="settings-form" class="grid">
+          <label>Staff role
+            <select name="staff_role_id" class="role-select"></select>
+          </label>
+          <label>Announcement channel
+            <select name="announcement_channel_id" class="channel-select"></select>
+          </label>
+          <label>Staff log channel
+            <select name="staff_channel_id" class="channel-select"></select>
+          </label>
+          <label>Timezone for typed times
+            <input name="timezone" placeholder="America/Toronto">
+          </label>
+          <label class="check span2"><input type="checkbox" name="require_approval"> Require approval: announcements wait for another staff member to approve them</label>
+          <label>Quiet hours start
+            <input name="quiet_start" placeholder="22:00">
+          </label>
+          <label>Quiet hours end
+            <input name="quiet_end" placeholder="08:00">
+          </label>
+          <label class="check span2"><input type="checkbox" name="quiet_hold_manual"> Also hold posts made by hand until quiet hours end</label>
+          <label>Ticket category
+            <select name="ticket_category_id" class="category-select"></select>
+          </label>
+          <label>Close idle tickets after (days, 0 means never)
+            <input name="ticket_auto_close_days" type="number" min="0" max="365" step="1" value="0">
+          </label>
+          <label>Keep local transcripts for (days, 0 means forever)
+            <input name="ticket_transcript_retention_days" type="number" min="0" max="3650" step="1" value="0">
+          </label>
+          <p class="span2 muted">Retention removes local transcript copies and download links after the chosen period. Files already sent to a Discord staff-log channel are not deleted automatically.</p>
+          <label>Support opens (server timezone)
+            <input name="support_hours_start" placeholder="09:00">
+          </label>
+          <label>Support closes (server timezone)
+            <input name="support_hours_end" placeholder="17:00">
+          </label>
+          <label class="span2">After-hours message
+            <textarea name="after_hours_message" maxlength="1000" rows="3" placeholder="Leave blank for the default message"></textarea>
+          </label>
+          <p class="span2 muted">Support hours can cross midnight. Leave both times blank for always-on support. Outside hours, new and reopened tickets include this message.</p>
+          <p class="span2 muted">Quiet hours hold scheduled and repeating posts until the window ends. Use 24-hour times in the server's timezone. Leave both empty to turn them off.</p>
+          <p class="span2 muted">Staff role: once set, only its holders (and administrators) can use staff tools. Leave it empty to fall back to Manage Server.</p>
+          <div class="actions span2"><button type="submit">Save settings</button></div>
+        </form>
+      </section>
+
+      <!-- Audit -->
+      <section class="panel" data-panel="audit" hidden>
+        <h2>Audit log</h2>
+        <div class="actions">
+          <button type="button" class="ghost" id="audit-refresh">Refresh</button>
+          <button type="button" class="ghost" id="audit-export">Export CSV</button>
+        </div>
+        <ul id="audit-list" class="list"></ul>
+      </section>
+    </div>
+  </main>
+
+  <script src="static/dashboard.js"></script>
+</body>
+</html>
