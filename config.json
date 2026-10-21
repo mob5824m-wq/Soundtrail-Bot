@@ -1,0 +1,12 @@
+{
+  "bot_token": "",
+  "default_timezone": "America/Toronto",
+  "dashboard_enabled": true,
+  "dashboard_host": "127.0.0.1",
+  "dashboard_port": 8765,
+  "dashboard_token": "",
+  "dashboard_secure_cookie": false,
+  "dashboard_allowed_hosts": [],
+  "dashboard_trusted_proxies": [],
+  "guilds": {}
+}
