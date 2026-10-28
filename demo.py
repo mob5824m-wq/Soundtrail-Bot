@@ -16,7 +16,6 @@ import asyncio
 import copy
 import logging
 import os
-import secrets
 import tempfile
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -358,7 +357,6 @@ class DemoGateway:
 def demo_config(guilds: list[dict[str, Any]]) -> dict[str, Any]:
     """A config where every demo server already has its roles and channels set."""
     cfg = copy.deepcopy(settings.DEFAULT_CONFIG)
-    cfg["dashboard_token"] = secrets.token_urlsafe(18)
     for guild in guilds:
         names = {name: cid for cid, name, _ in guild["channels"]}
         roles = {name: rid for rid, name, _ in guild["roles"]}
@@ -462,11 +460,9 @@ async def run_demo(host: str = "127.0.0.1", port: int = 8765) -> None:
     dashboard = DashboardServer(
         gateway,
         cfg,
-        token=cfg["dashboard_token"],
         host=host,
         port=port,
         allowed_hosts=["*"],
-        secure_cookie=False,
         demo=True,
     )
     await dashboard.start()

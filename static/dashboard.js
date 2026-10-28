@@ -155,18 +155,14 @@
     } catch (_) {
       data = null;
     }
-    if (response.status === 401 && path !== "login") {
-      // Demo mode has no token to type. If its session went stale (the server
-      // restarted or the cookie expired), open a fresh one and retry once.
-      if (state.demo && !retried && path !== "session") {
-        const session = await api("session");
-        if (session.authenticated) {
-          state.csrf = session.csrf;
-          return api(path, { method, body, retried: true });
-        }
+    if (response.status === 403 && !retried && path !== "session") {
+      // The CSRF token changes when the bot restarts. Fetch the new one and
+      // retry once rather than asking for a reload.
+      const session = await api("session");
+      if (session.csrf) {
+        state.csrf = session.csrf;
+        return api(path, { method, body, retried: true });
       }
-      showLogin();
-      throw new Error("Your session has ended. Sign in again.");
     }
     if (!response.ok) {
       throw new Error((data && data.error) || `Request failed (${response.status}).`);
@@ -175,70 +171,18 @@
   }
 
   // ------------------------------------------------------------------ //
-  // Login, session, servers
+  // Startup and servers
   // ------------------------------------------------------------------ //
-  function showLogin() {
-    state.csrf = null;
-    state.guildId = null;
-    $("#app-view").hidden = true;
-    $("#logout-btn").hidden = true;
-    $("#guild-select").replaceChildren();
-    $("#guild-select").disabled = true;
-    $("#login-view").hidden = false;
-    $("#token").focus();
-  }
-
-  function showApp() {
-    $("#login-view").hidden = true;
-    $("#app-view").hidden = false;
-    // The demo has no sign-in to return to, so it has no log-out either.
-    $("#logout-btn").hidden = state.demo;
-  }
-
+  // There is no sign-in: the page is only reachable from this machine or an
+  // SSH tunnel (see dashboard.py), so it opens straight into the app.
   async function boot() {
     const session = await api("session");
+    state.csrf = session.csrf;
     state.demo = Boolean(session.demo);
     $("#demo-badge").hidden = !state.demo;
     $("#version").textContent = session.version ? `v${session.version}` : "";
-    if (session.authenticated) {
-      state.csrf = session.csrf;
-      showApp();
-      await loadGuilds();
-    } else {
-      showLogin();
-    }
+    await loadGuilds();
   }
-
-  $("#login-form").addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const button = event.currentTarget.querySelector("button");
-    const errorBox = $("#login-error");
-    errorBox.hidden = true;
-    button.disabled = true;
-    try {
-      const data = await api("login", { method: "POST", body: { token: $("#token").value } });
-      state.csrf = data.csrf;
-      state.demo = Boolean(data.demo);
-      $("#demo-badge").hidden = !state.demo;
-      $("#token").value = "";
-      showApp();
-      await loadGuilds();
-    } catch (err) {
-      errorBox.textContent = err.message;
-      errorBox.hidden = false;
-    } finally {
-      button.disabled = false;
-    }
-  });
-
-  $("#logout-btn").addEventListener("click", async () => {
-    try {
-      await api("logout", { method: "POST" });
-    } catch (_) {
-      // Logging out locally is enough even if the request fails.
-    }
-    showLogin();
-  });
 
   async function loadGuilds() {
     state.guilds = await api("guilds");
@@ -1274,7 +1218,7 @@
         credentials: "same-origin",
         cache: "no-store",
       });
-      if (!response.ok) throw new Error(`The export failed (${response.status}). Sign in again if the session ended.`);
+      if (!response.ok) throw new Error(`The export failed (${response.status}). Reload the page and try again.`);
       const url = URL.createObjectURL(await response.blob());
       const link = el("a", { href: url, download: `soundtrail-support-audit-${state.guildId}.csv` });
       document.body.append(link);

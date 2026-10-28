@@ -36,7 +36,7 @@ Everything staff use is reached through one slash-command group, ``/manage``:
 
 The web dashboard runs in the same process and calls the same operations. See
 ``dashboard.py``. ``python bot.py --demo`` runs the dashboard with simulated
-servers and no token.
+servers and no Discord connection.
 """
 
 from __future__ import annotations
@@ -68,7 +68,7 @@ import tickets
 import welcome
 from audit import Actor
 from command_tree import is_administrator, manage_group
-from dashboard import DashboardServer, ensure_dashboard_token
+from dashboard import DashboardServer
 from discord_gateway import DiscordGateway
 from operations import OperationError
 from settings import DEFAULT_CONFIG, load_config, resolve_token, staff_denial
@@ -133,16 +133,12 @@ class SoundtrailSupportBot(commands.Bot):
             logger.info("Dashboard disabled (dashboard_enabled is false).")
             return
         try:
-            token = ensure_dashboard_token(self.config)
             self.dashboard = DashboardServer(
                 self.gateway,
                 self.config,
-                token=token,
                 host=str(self.config.get("dashboard_host") or "127.0.0.1"),
                 port=int(self.config.get("dashboard_port") or 8765),
                 allowed_hosts=self.config.get("dashboard_allowed_hosts") or [],
-                trusted_proxies=self.config.get("dashboard_trusted_proxies") or [],
-                secure_cookie=bool(self.config.get("dashboard_secure_cookie")),
             )
             await self.dashboard.start()
         except Exception:  # the bot keeps running without its dashboard
@@ -1803,12 +1799,11 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 # --------------------------------------------------------------------------- #
 def _help() -> str:
     return (
-        "usage: python bot.py [--paths | --version | --dashboard-token | --demo [--host H] [--port P] | --check]\n"
+        "usage: python bot.py [--paths | --version | --demo [--host H] [--port P] | --check]\n"
         "  (no option)        run the Discord bot and its dashboard\n"
         "  --paths            show where this install keeps its files\n"
         "  --version          show the version\n"
-        "  --dashboard-token  print the dashboard login token (creates one if needed)\n"
-        "  --demo             run the dashboard over simulated servers (no token, no Discord)\n"
+        "  --demo             run the dashboard over simulated servers (no Discord)\n"
         "  --check            check the configuration without connecting to Discord\n"
     )
 
@@ -1848,9 +1843,6 @@ def main(argv: Optional[list[str]] = None) -> int:
     logger.info("Soundtrail Support %s", paths.app_version())
     logger.info("Data directory: %s", paths.data_dir())
     store.init_db()
-    if "--dashboard-token" in args:
-        print(ensure_dashboard_token(bot.config))
-        return 0
     if "--check" in args:
         token = resolve_token(bot.config)
         print("Token: " + ("set" if token else "MISSING (set DISCORD_TOKEN or bot_token)"))
@@ -1866,8 +1858,6 @@ def main(argv: Optional[list[str]] = None) -> int:
             paths.config_path(),
         )
         return 1
-    if bot.config.get("dashboard_enabled", True):
-        ensure_dashboard_token(bot.config)
     try:
         bot.run(token, log_handler=None)
     except discord.LoginFailure:
