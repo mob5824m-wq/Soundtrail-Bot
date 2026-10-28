@@ -8,10 +8,7 @@ Config shape (``data/config.json``)::
       "dashboard_enabled": true,
       "dashboard_host": "127.0.0.1",
       "dashboard_port": 8765,
-      "dashboard_token": "...",            # generated on first run
-      "dashboard_secure_cookie": false,
-      "dashboard_allowed_hosts": [],       # extra Host names (reverse proxy)
-      "dashboard_trusted_proxies": [],     # addresses whose X-Forwarded-For counts
+      "dashboard_allowed_hosts": [],       # extra Host names the dashboard answers to
       "guilds": {
         "<guild id>": {
           "staff_role_id": 123,
@@ -51,10 +48,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "dashboard_enabled": True,
     "dashboard_host": "127.0.0.1",
     "dashboard_port": 8765,
-    "dashboard_token": "",
-    "dashboard_secure_cookie": False,
     "dashboard_allowed_hosts": [],
-    "dashboard_trusted_proxies": [],
     "guilds": {},
 }
 
@@ -103,7 +97,7 @@ def load_config() -> dict[str, Any]:
             logger.error("Ignoring unreadable config %s (%s).", source, exc)
     if not isinstance(cfg.get("guilds"), dict):
         cfg["guilds"] = {}
-    for key in ("dashboard_allowed_hosts", "dashboard_trusted_proxies"):
+    for key in ("dashboard_allowed_hosts",):
         if not isinstance(cfg.get(key), list):
             cfg[key] = []
     return cfg
@@ -116,7 +110,7 @@ def save_config(cfg: dict[str, Any]) -> None:
     tmp = target.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
     try:
-        os.chmod(tmp, 0o600)  # the file holds the bot and dashboard secrets
+        os.chmod(tmp, 0o600)  # the file holds the bot token
     except OSError:
         pass
     os.replace(tmp, target)

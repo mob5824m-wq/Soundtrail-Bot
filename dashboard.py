@@ -1,34 +1,32 @@
-"""Authenticated web dashboard for Soundtrail Support.
+"""Web dashboard for Soundtrail Support (no sign-in).
 
 The dashboard is a single page (``dashboard.html`` with ``static/``) backed by
 a JSON API under ``/api``. Every button on the page calls the same
 :mod:`operations` functions as the slash commands, so the two can not drift
 apart, and every action is recorded in the audit log as ``dashboard``.
 
-Security
-    * The dashboard token is a bot-wide credential. It is generated on first
-      run, kept in ``data/config.json``, and printed by ``--dashboard-token``.
-      The Discord bot token will not work here.
-    * The session is an HttpOnly, SameSite=Strict cookie. Every write also needs
-      an ``X-CSRF-Token`` header that matches the session.
+Access control
+    There is no password. Access is controlled by who can reach the port:
+    the default bind is 127.0.0.1, so the page is only reachable from a
+    browser on the bot's own machine or through an SSH tunnel. Anyone who
+    *can* reach the page has full staff control of the bot, so never bind
+    it to a public address, port-forward it, or put it on the open internet.
+
+    What remains is protection against other web pages, not against people:
     * The ``Host`` header must be a loopback name or one of
       ``dashboard_allowed_hosts``. This blocks DNS rebinding.
-    * Login attempts are throttled per client address. Set
-      ``dashboard_trusted_proxies`` so a reverse proxy's ``X-Forwarded-For``
-      counts; without it every visitor looks like the proxy.
-    * The default bind is 127.0.0.1. Reach it from another machine through an
-      SSH tunnel or a reverse proxy that terminates HTTPS.
+    * Every write needs an ``X-CSRF-Token`` header holding a random token
+      generated at startup and only served to the page itself via
+      ``/api/session``. Another website cannot read it (same-origin policy),
+      so it cannot forge a write from your browser.
 """
 
 from __future__ import annotations
 
 import hmac
-import ipaddress
 import json
 import logging
 import secrets
-import time
-from collections import deque
 from pathlib import Path
 from typing import Any, Optional
 
@@ -49,25 +47,12 @@ INDEX_PATH = APP_DIR / "dashboard.html"
 STATIC_DIR = APP_DIR / "static"
 STATIC_FILES = {"dashboard.js", "dashboard.css"}
 
-SESSION_COOKIE = "cm_session"
-SESSION_TTL_SECONDS = 12 * 60 * 60
-LOGIN_WINDOW_SECONDS = 10 * 60
-LOGIN_MAX_FAILURES = 8
 LOOPBACK_NAMES = frozenset({"localhost", "127.0.0.1", "::1"})
 MAX_BODY_BYTES = 64 * 1024
 CONTENT_SECURITY_POLICY = (
     "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
     "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
 )
-
-
-def ensure_dashboard_token(cfg: dict[str, Any]) -> str:
-    """Return the dashboard token, generating and saving one on first use."""
-    if cfg.get("dashboard_token"):
-        return str(cfg["dashboard_token"])
-    cfg["dashboard_token"] = secrets.token_urlsafe(24)
-    settings.save_config(cfg)
-    return cfg["dashboard_token"]
 
 
 def _hostname(header: str) -> str:
@@ -113,35 +98,24 @@ class DashboardServer:
         gateway: ops.Gateway,
         config: dict[str, Any],
         *,
-        token: str,
         host: str = "127.0.0.1",
         port: int = 8765,
         allowed_hosts: list[str] | tuple[str, ...] = (),
-        trusted_proxies: list[str] | tuple[str, ...] = (),
-        secure_cookie: bool = False,
         demo: bool = False,
     ) -> None:
-        if not token:
-            raise ValueError("The dashboard needs a token.")
         self.gateway = gateway
         self.config = config
-        self.token = token
         self.host = host
         self.port = int(port)
-        self.secure_cookie = secure_cookie
         self.demo = demo
         self.allowed_hosts = {h.lower() for h in allowed_hosts} | LOOPBACK_NAMES
-        self._trusted = self._parse_networks(trusted_proxies)
-        self._sessions: dict[str, dict[str, Any]] = {}
-        self._failures: dict[str, deque[float]] = {}
         self._runner: Optional[web.AppRunner] = None
         self._app: Optional[web.Application] = None
-        # Demo mode serves simulated data only, with no secrets. It does not use
-        # the cookie at all: browsers drop SameSite=Strict cookies set inside a
-        # framed preview, which would leave every request looking signed out.
-        self._demo_session: Optional[dict[str, Any]] = (
-            {"csrf": secrets.token_urlsafe(24), "expires": float("inf")} if demo else None
-        )
+        # No sign-in: anyone who can reach the page may use it (see the module
+        # docstring). This token is not a password — the page itself fetches
+        # it from /api/session — it only stops *other* websites from forging
+        # writes from your browser, since they cannot read it cross-origin.
+        self._csrf = secrets.token_urlsafe(24)
 
     # ------------------------------------------------------------------ #
     # Application
@@ -162,8 +136,6 @@ class DashboardServer:
         r.add_get("/", self._index)
         r.add_get("/static/{name}", self._static)
         r.add_get("/api/session", self._session_info)
-        r.add_post("/api/login", self._login)
-        r.add_post("/api/logout", self._logout)
         r.add_get("/api/guilds", self._guilds)
 
         g = "/api/guilds/{gid}"
@@ -249,71 +221,21 @@ class DashboardServer:
             response.headers["Cache-Control"] = "no-store"
 
     # ------------------------------------------------------------------ #
-    # Sessions, throttling and addresses
+    # Write protection
     # ------------------------------------------------------------------ #
-    def _session(self, request: web.Request) -> Optional[dict[str, Any]]:
-        if self._demo_session is not None:
-            return self._demo_session
-        sid = request.cookies.get(SESSION_COOKIE)
-        if not sid:
-            return None
-        session = self._sessions.get(sid)
-        if session is None:
-            return None
-        if session["expires"] < time.time():
-            self._sessions.pop(sid, None)
-            return None
-        return session
+    def _check_write(self, request: web.Request) -> None:
+        """Refuse a write without the page's CSRF token (403).
 
-    def _authed(self, request: web.Request) -> dict[str, Any]:
-        """The session, or a 401. Writes also need the CSRF header (403)."""
-        session = self._session(request)
-        if session is None:
-            raise _http(web.HTTPUnauthorized, "Log in with the dashboard token first.")
-        if request.method != "GET":
-            supplied = request.headers.get("X-CSRF-Token", "")
-            if not hmac.compare_digest(supplied.encode(), session["csrf"].encode()):
-                raise _http(web.HTTPForbidden, "The page is out of date. Reload it and try again.")
-        return session
-
-    def _parse_networks(self, entries) -> list:
-        networks = []
-        for entry in entries or ():
-            try:
-                networks.append(ipaddress.ip_network(str(entry), strict=False))
-            except ValueError:
-                logger.warning("Ignoring invalid dashboard_trusted_proxies entry %r", entry)
-        return networks
-
-    def _is_trusted(self, address: str) -> bool:
-        try:
-            ip = ipaddress.ip_address(address)
-        except ValueError:
-            return False
-        return any(ip in network for network in self._trusted)
-
-    def _client_ip(self, request: web.Request) -> str:
-        remote = request.remote or "unknown"
-        if self._is_trusted(remote):
-            hops = [h.strip() for h in request.headers.get("X-Forwarded-For", "").split(",") if h.strip()]
-            for hop in reversed(hops):
-                if not self._is_trusted(hop):
-                    return hop
-        return remote
-
-    def _throttled(self, ip: str) -> bool:
-        failures = self._failures.get(ip)
-        if not failures:
-            return False
-        cutoff = time.time() - LOGIN_WINDOW_SECONDS
-        while failures and failures[0] < cutoff:
-            failures.popleft()
-        return len(failures) >= LOGIN_MAX_FAILURES
-
-    def _prune_sessions(self) -> None:
-        now = time.time()
-        for sid in [s for s, data in self._sessions.items() if data["expires"] < now]:
-            self._sessions.pop(sid, None)
+        There is no sign-in to check: reads are open to whoever can reach
+        the page. Writes still need the token so that a malicious website
+        open in the same browser cannot forge a request — it cannot read
+        the token from ``/api/session`` across origins.
+        """
+        if request.method == "GET":
+            return
+        supplied = request.headers.get("X-CSRF-Token", "")
+        if not hmac.compare_digest(supplied.encode(), self._csrf.encode()):
+            raise _http(web.HTTPForbidden, "The page is out of date. Reload it and try again.")
 
     async def _guild(self, request: web.Request) -> dict[str, Any]:
         try:
@@ -338,7 +260,7 @@ class DashboardServer:
         return web.json_response(_jsonable(payload), status=status, dumps=lambda o: json.dumps(o, default=str))
 
     # ------------------------------------------------------------------ #
-    # Static pages and session
+    # Static pages and page info
     # ------------------------------------------------------------------ #
     async def _index(self, request: web.Request) -> web.StreamResponse:
         if not INDEX_PATH.is_file():
@@ -352,67 +274,29 @@ class DashboardServer:
         return web.FileResponse(STATIC_DIR / name)
 
     async def _session_info(self, request: web.Request) -> web.Response:
-        session = self._session(request)
+        """What the page needs at load: its CSRF token, demo flag, version.
+
+        Kept under the old ``/api/session`` name; there is no session and
+        no sign-in any more, so this always succeeds.
+        """
         return self._json(
             {
-                "authenticated": session is not None,
-                "csrf": session["csrf"] if session else None,
+                "authenticated": True,
+                "csrf": self._csrf,
                 "demo": self.demo,
                 "version": paths.app_version(),
             }
         )
 
-    async def _login(self, request: web.Request) -> web.Response:
-        ip = self._client_ip(request)
-        if self._throttled(ip):
-            raise _http(web.HTTPTooManyRequests, "Too many attempts. Wait a few minutes and try again.")
-        body = await self._body(request)
-        supplied = str(body.get("token") or "")
-        if not supplied or not hmac.compare_digest(supplied.encode(), self.token.encode()):
-            self._failures.setdefault(ip, deque()).append(time.time())
-            raise _http(web.HTTPUnauthorized, "That dashboard token is not right.")
-
-        self._failures.pop(ip, None)
-        sid, session = self._open_session()
-        response = self._json({"csrf": session["csrf"], "expires_in": SESSION_TTL_SECONDS, "demo": self.demo})
-        self._attach_session(response, sid)
-        return response
-
-    def _open_session(self) -> tuple[str, dict[str, Any]]:
-        self._prune_sessions()
-        sid = secrets.token_urlsafe(32)
-        session = {"csrf": secrets.token_urlsafe(24), "expires": time.time() + SESSION_TTL_SECONDS}
-        self._sessions[sid] = session
-        return sid, session
-
-    def _attach_session(self, response: web.StreamResponse, sid: str) -> None:
-        response.set_cookie(
-            SESSION_COOKIE,
-            sid,
-            max_age=SESSION_TTL_SECONDS,
-            httponly=True,
-            samesite="Strict",
-            secure=self.secure_cookie,
-            path="/",
-        )
-
-    async def _logout(self, request: web.Request) -> web.Response:
-        sid = request.cookies.get(SESSION_COOKIE)
-        if sid:
-            self._sessions.pop(sid, None)
-        response = self._json({"ok": True})
-        response.del_cookie(SESSION_COOKIE, path="/")
-        return response
-
     # ------------------------------------------------------------------ #
     # Servers and overview
     # ------------------------------------------------------------------ #
     async def _guilds(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         return self._json(self.gateway.guilds())
 
     async def _overview(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         data = ops.overview(self.config, guild["id"])
         return self._json(
@@ -424,7 +308,7 @@ class DashboardServer:
         )
 
     async def _snapshot(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         snapshot = self.gateway.snapshot(guild["id"])
         if snapshot is None:
@@ -455,12 +339,12 @@ class DashboardServer:
         }
 
     async def _settings_get(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         return self._json(self._settings_payload(guild["id"]))
 
     async def _settings_put(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         body = await self._body(request)
         changes = {k: v for k, v in body.items() if k in ops.SETTING_FIELDS}
@@ -474,13 +358,13 @@ class DashboardServer:
     # Announcements
     # ------------------------------------------------------------------ #
     async def _history(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         limit = _as_int(request.query.get("limit"), "limit") or 25
         return self._json(ops.list_history(guild["id"], limit))
 
     async def _announce(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         body = await self._body(request)
         result = await ops.announce_now(
@@ -498,17 +382,17 @@ class DashboardServer:
         return self._json(result)
 
     async def _scheduled_list(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         return self._json(ops.list_schedule(guild["id"]))
 
     async def _pins_list(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         return self._json(ops.list_pins(guild["id"]))
 
     async def _scheduled_create(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         body = await self._body(request)
         result = await ops.schedule_announcement(
@@ -528,7 +412,7 @@ class DashboardServer:
         return self._json(result, status=201)
 
     async def _scheduled_cancel(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         sid = _as_int(request.match_info["sid"], "id")
         ops.cancel_schedule(guild["id"], DASHBOARD_ACTOR, sid)
@@ -538,12 +422,12 @@ class DashboardServer:
     # Templates
     # ------------------------------------------------------------------ #
     async def _templates_list(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         return self._json(ops.list_templates(guild["id"]))
 
     async def _templates_save(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         body = await self._body(request)
         result = await ops.save_template(
@@ -556,13 +440,13 @@ class DashboardServer:
         return self._json(result)
 
     async def _templates_delete(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         ops.delete_template(guild["id"], DASHBOARD_ACTOR, request.match_info["name"])
         return self._json({"ok": True})
 
     async def _templates_use(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         body = await self._body(request)
         result = await ops.use_template(
@@ -581,12 +465,12 @@ class DashboardServer:
     # Polls and events
     # ------------------------------------------------------------------ #
     async def _polls_list(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         return self._json(ops.list_polls(guild["id"]))
 
     async def _polls_create(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         body = await self._body(request)
         result = await ops.create_poll(
@@ -604,13 +488,13 @@ class DashboardServer:
         return self._json(result, status=201)
 
     async def _poll_detail(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         pid = _as_int(request.match_info["pid"], "id")
         return self._json(ops.poll_details(guild["id"], pid))
 
     async def _polls_close(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         pid = _as_int(request.match_info["pid"], "id")
         result = await ops.close_poll(self.gateway, self.config, guild["id"], DASHBOARD_ACTOR, pid)
@@ -620,12 +504,12 @@ class DashboardServer:
     # Tickets and reaction roles
     # ------------------------------------------------------------------ #
     async def _tickets_list(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         return self._json(ops.list_tickets(guild["id"], open_only=request.query.get("open") == "1"))
 
     async def _ticket_panel(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         body = await self._body(request)
         result = await ops.post_ticket_panel(
@@ -638,7 +522,7 @@ class DashboardServer:
         return self._json(result, status=201)
 
     async def _ticket_close(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         tid = _as_int(request.match_info["tid"], "id")
         body = await self._body(request) if request.content_length else {}
@@ -654,12 +538,12 @@ class DashboardServer:
         return self._json(result)
 
     async def _reaction_roles_list(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         return self._json(ops.list_reaction_roles(guild["id"]))
 
     async def _reaction_role_add(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         body = await self._body(request)
         result = await ops.add_reaction_role(
@@ -675,7 +559,7 @@ class DashboardServer:
         return self._json(result, status=201)
 
     async def _ticket_transcript(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         tid = _as_int(request.match_info["tid"], "id")
         row = ops.get_ticket_transcript(guild["id"], tid)
@@ -687,13 +571,13 @@ class DashboardServer:
         )
 
     async def _ticket_transcripts_list(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         tid = _as_int(request.match_info["tid"], "id")
         return self._json(ops.list_ticket_transcripts(guild["id"], tid))
 
     async def _ticket_transcript_version(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         tid = _as_int(request.match_info["tid"], "id")
         version_id = _as_int(request.match_info["vid"], "id")
@@ -706,12 +590,12 @@ class DashboardServer:
         )
 
     async def _role_menus_list(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         return self._json(ops.list_role_menus(guild["id"]))
 
     async def _role_menu_create(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         body = await self._body(request)
         result = await ops.create_role_menu(
@@ -725,14 +609,14 @@ class DashboardServer:
         return self._json(result, status=201)
 
     async def _role_menu_delete(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         mid = _as_int(request.match_info["mid"], "id")
         result = await ops.delete_role_menu(self.gateway, self.config, guild["id"], DASHBOARD_ACTOR, menu_id=mid)
         return self._json(result)
 
     async def _role_menu_option_add(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         body = await self._body(request)
         result = await ops.add_role_menu_option(
@@ -748,7 +632,7 @@ class DashboardServer:
         return self._json(result, status=201)
 
     async def _role_menu_option_remove(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         result = await ops.remove_role_menu_option(
             self.gateway,
@@ -761,7 +645,7 @@ class DashboardServer:
         return self._json(result)
 
     async def _role_menu_post(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         body = await self._body(request)
         result = await ops.post_role_menu(
@@ -775,18 +659,18 @@ class DashboardServer:
         return self._json(result, status=201)
 
     async def _reaction_role_remove(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         ops.remove_reaction_role(guild["id"], DASHBOARD_ACTOR, _as_int(request.match_info["rid"], "id"))
         return self._json({"ok": True})
 
     async def _events_list(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         return self._json(await ops.list_events(self.gateway, guild["id"]))
 
     async def _events_create(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         body = await self._body(request)
         result = await ops.create_event(
@@ -803,7 +687,7 @@ class DashboardServer:
         return self._json(result, status=201)
 
     async def _events_cancel(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         eid = _as_int(request.match_info["eid"], "id")
         await ops.cancel_event(self.gateway, self.config, guild["id"], DASHBOARD_ACTOR, eid)
@@ -813,7 +697,7 @@ class DashboardServer:
     # Welcome, audit
     # ------------------------------------------------------------------ #
     async def _welcome_set(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         body = await self._body(request)
         channel_id = _as_int(body.get("channel_id"), "channel_id")
@@ -831,13 +715,13 @@ class DashboardServer:
         return self._json(result)
 
     async def _welcome_off(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         ops.disable_welcome(self.config, guild["id"], DASHBOARD_ACTOR)
         return self._json({"ok": True})
 
     async def _welcome_test(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         result = await ops.send_test_welcome(
             self.gateway,
@@ -850,7 +734,7 @@ class DashboardServer:
         return self._json(result)
 
     async def _announcement_edit(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         body = await self._body(request)
         result = await ops.edit_announcement(
@@ -865,7 +749,7 @@ class DashboardServer:
         return self._json(result)
 
     async def _announcement_delete(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         await ops.delete_announcement(
             self.gateway,
@@ -877,12 +761,12 @@ class DashboardServer:
         return self._json({"ok": True})
 
     async def _approvals_list(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         return self._json(ops.list_approvals(guild["id"]))
 
     async def _approval_approve(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         result = await ops.approve_request(
             self.gateway,
@@ -894,13 +778,13 @@ class DashboardServer:
         return self._json(result)
 
     async def _approval_reject(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         await ops.reject_request(guild["id"], DASHBOARD_ACTOR, _as_int(request.match_info["rid"], "id"))
         return self._json({"ok": True})
 
     async def _audit_csv(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         return web.Response(
             text=ops.export_audit_csv(guild["id"]),
@@ -910,7 +794,7 @@ class DashboardServer:
         )
 
     async def _audit(self, request: web.Request) -> web.Response:
-        self._authed(request)
+        self._check_write(request)
         guild = await self._guild(request)
         limit = _as_int(request.query.get("limit"), "limit") or audit.DEFAULT_LIMIT
         return self._json(audit.list_entries(guild["id"], limit))

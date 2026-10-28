@@ -255,7 +255,7 @@ Every option is optional, and only the ones you pass are changed.
 | Staff tools under `/manage` (including FAQ management and ticket claim/assign/close) | Holders of the **staff role**, and administrators |
 | `/manage ticket reopen` | The ticket opener, support staff, or administrators |
 | `setup`, `fixcommands` | Administrators |
-| The dashboard | Anyone with the dashboard token (see [section 4](#4-the-dashboard)) |
+| The dashboard | Anyone who can open the page — there is no sign-in, so only via a browser on the bot's machine or an SSH tunnel (see [section 4](#4-the-dashboard)) |
 
 The check runs again every time a command is used, so a Discord integration
 that shows the commands to more people does not give them access.
@@ -277,17 +277,13 @@ and idle close), reaction roles, role menus and events, set
 welcome messages, change settings, and read the audit log. Every button calls the same code as its command, so the two can
 not drift apart.
 
-### Get the token and sign in
+### Open it
 
-```bash
-python bot.py --dashboard-token
-```
-
-This prints the token, creating one on first use and saving it in
-`data/config.json` (the file is written with owner-only permissions). Open
-`http://127.0.0.1:8765` on the bot's machine and paste it in. The Discord bot
-token does not work on the dashboard, and the dashboard token does not work on
-Discord.
+There is no sign-in and no dashboard password. Open
+`http://127.0.0.1:8765` in a browser on the bot's machine and the page is
+ready to use. Access is controlled by who can reach the port instead: by
+default the dashboard only listens on `127.0.0.1`, so from another computer
+you reach it through an [SSH tunnel](#remote-access-over-ssh) below.
 
 ### Settings
 
@@ -296,10 +292,7 @@ Discord.
 | `dashboard_enabled` | `true` | Set to `false` to run the bot without the dashboard. |
 | `dashboard_host` | `127.0.0.1` | Address to listen on. Loopback means only this machine can reach it. |
 | `dashboard_port` | `8765` | Port to listen on. |
-| `dashboard_token` | created on first use | The sign-in token. Change it by editing the file and restarting. |
-| `dashboard_secure_cookie` | `false` | Set to `true` when the dashboard is served over HTTPS, so the session cookie is only sent over HTTPS. |
 | `dashboard_allowed_hosts` | `[]` | Extra host names the dashboard answers to, e.g. `["staff.example.com"]`. Loopback names are always allowed. Requests with any other `Host` header get a 400. |
-| `dashboard_trusted_proxies` | `[]` | Addresses of reverse proxies, e.g. `["127.0.0.1"]`. Their `X-Forwarded-For` header is used to tell visitors apart for the login throttle. Without this, every visitor looks like the proxy. |
 
 ### Remote access over SSH
 
@@ -316,28 +309,30 @@ new is opened on the server, and the port never faces the internet.
 
    `-N` means no remote shell, only the tunnel. Leave the window open while you
    use the dashboard. Windows 10 and later include this `ssh` command.
-3. Open `http://localhost:8765` in your browser and paste the token.
+3. Open `http://localhost:8765` in your browser. There is nothing to sign in to.
 
 If port 8765 is already in use on your computer, pick another local port, such
 as `-L 9000:127.0.0.1:8765`, and open `http://localhost:9000`. Use `localhost`
 rather than an IP address, since loopback names are the ones the dashboard
-accepts. You do not need to change `dashboard_allowed_hosts` or
-`dashboard_secure_cookie` for a tunnel. The browser talks plain HTTP to your
-own machine, and SSH carries the traffic to the server.
+accepts. You do not need to change `dashboard_allowed_hosts` for a tunnel.
+The browser talks plain HTTP to your own machine, and SSH carries the
+traffic to the server.
 
 ### Security
 
-* The session is an **HttpOnly, SameSite=Strict** cookie. Every change also
-  needs an `X-CSRF-Token` header that matches the session.
-* Failed sign-ins are throttled per client address (after 8 failures in 10
-  minutes, sign-in is refused for a while).
+There is no password, so treat reaching the page as staff access:
+
+* The default is to listen on `127.0.0.1` only. To reach it from another
+  machine, use an SSH tunnel. **Do not** set `dashboard_host` to a public
+  address, port-forward it, or expose it through a reverse proxy: anyone
+  who can open the page then has full staff control of the bot.
+* Every change the page makes needs an `X-CSRF-Token` header holding a
+  random token generated when the bot starts and served only to the page
+  itself. Another website open in the same browser cannot read that token,
+  so it cannot forge a change.
 * The `Host` header must be a name you have allowed (loopback by default). This
   blocks DNS-rebinding attacks.
 * The page sends a strict Content-Security-Policy, and no inline scripts.
-* The default is to listen on `127.0.0.1` only. To reach it from another
-  machine, use an SSH tunnel, or put a reverse proxy that terminates HTTPS in
-  front of it and list the proxy in `dashboard_trusted_proxies`. Do not open the
-  port to the internet directly.
 
 ### Demo mode
 
@@ -345,7 +340,7 @@ own machine, and SSH carries the traffic to the server.
 python bot.py --demo
 ```
 
-`--demo` runs the dashboard over two simulated servers, with no token, no
+`--demo` runs the dashboard over two simulated servers, with no sign-in, no
 Discord connection and no real data. Posts, polls, reactions and reminders all
 happen in memory. The database is a temporary directory unless
 `SOUNDTRAIL_SUPPORT_DATA` is set. To try it from another machine (for example in a
@@ -458,8 +453,8 @@ somewhere else.
   the member, or have an administrator check `/manage status`.
 * **The dashboard says "Unrecognized Host header".** You are reaching it under a
   name that is not loopback. Add that name to `dashboard_allowed_hosts`.
-* **The dashboard says "The page is out of date".** The session changed in
-  another tab. Reload the page.
+* **The dashboard says "The page is out of date".** The bot restarted while
+  the page was open. Reload the page.
 * **The dashboard does not open.** Check `data/bot.log`. A port that is already
   in use is reported there. Change `dashboard_port`, or set `dashboard_enabled`
   to `false`.
